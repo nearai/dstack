@@ -8,15 +8,32 @@
 use anyhow::{bail, Context, Result};
 use dstack_vmm_rpc::PortMapping;
 use std::net::TcpListener;
+use std::ops::RangeInclusive;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-/// pick a currently-free TCP port on loopback by binding to port 0.
+/// host ports handed out when the caller does not choose one. The range sits
+/// below the Linux ephemeral range and inside the port-mapping allowlist that
+/// `dstackup install` writes to vmm.toml (tcp 1-20000). A port from binding
+/// port 0 is ephemeral, so the VMM would refuse to map it.
+pub const AUTO_HOST_PORT_RANGE: RangeInclusive<u16> = 10000..=19999;
+
+/// pick a currently-free TCP port on loopback from [`AUTO_HOST_PORT_RANGE`].
 ///
 /// inherently racy (the port could be taken before the VMM binds it), but fine
 /// for a single interactive deploy; the VMM will surface a bind conflict.
 pub fn free_local_port() -> Result<u16> {
-    let listener = TcpListener::bind("127.0.0.1:0").context("failed to find a free host port")?;
-    let port = listener.local_addr()?.port();
-    Ok(port)
+    let (first, last) = (*AUTO_HOST_PORT_RANGE.start(), *AUTO_HOST_PORT_RANGE.end());
+    let len = u32::from(last - first) + 1;
+    // start the scan at a varying offset so back-to-back picks spread out
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0)
+        ^ std::process::id();
+    (0..len)
+        .map(|i| first + (seed.wrapping_add(i) % len) as u16)
+        .find(|&port| tcp_port_free("127.0.0.1", port))
+        .with_context(|| format!("failed to find a free host port in {first}-{last}"))
 }
 
 /// whether `addr:port` can be bound right now. Best-effort and racy, but it
@@ -93,6 +110,14 @@ fn parse_port_number(value: &str, label: &str, spec: &str) -> Result<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_host_ports_come_from_the_auto_range() {
+        let port = free_local_port().unwrap();
+        assert!(AUTO_HOST_PORT_RANGE.contains(&port), "{port}");
+        let mapping = parse_port("80").unwrap();
+        assert!(AUTO_HOST_PORT_RANGE.contains(&(mapping.host_port as u16)));
+    }
 
     #[test]
     fn parses_fixed_direct_host_mapping() {
