@@ -4,7 +4,7 @@
 
 //! `dstackup image` — fetch, list, and remove guest OS images.
 //!
-//! Images are published as `guest-os-v*` release tarballs in the dstack
+//! Images are published as `mkosi-os-v*` release tarballs in the dstack
 //! monorepo. Current releases use one hardware-adaptive `dstack-<ver>` image;
 //! legacy releases may also contain `dstack-nvidia-<ver>` variants.
 //! `install` validates the selected image against `digest.txt`, the OS image
@@ -25,8 +25,10 @@ use std::time::SystemTime;
 
 const REPO: &str = "Dstack-TEE/dstack";
 const LEGACY_REPO: &str = "Dstack-TEE/meta-dstack";
-const RELEASE_TAG_PREFIX: &str = "guest-os-v";
-pub(crate) const RELEASES_URL: &str = "https://github.com/Dstack-TEE/dstack/releases?q=guest-os-v";
+/// Tag prefixes of monorepo guest-OS releases. The mkosi release workflow tags
+/// them `mkosi-os-v<version>`; `guest-os-v` is still accepted.
+const RELEASE_TAG_PREFIXES: [&str; 2] = ["mkosi-os-v", "guest-os-v"];
+pub(crate) const RELEASES_URL: &str = "https://github.com/Dstack-TEE/dstack/releases?q=mkosi-os-v";
 const LEGACY_RELEASES_URL: &str = "https://github.com/Dstack-TEE/meta-dstack/releases";
 const MONOREPO_GUEST_OS_MIN_VERSION: (u64, u64, u64) = (0, 6, 0);
 
@@ -620,12 +622,13 @@ fn missing_named_image_message(image_dir: &str, name: &str) -> String {
 async fn fetch_release(version: Option<&str>, release_api_base_url: &str) -> Result<Release> {
     let client = reqwest::Client::new();
     if let Some(version) = version {
-        let (version, url, releases_url) = tagged_release_location(version, release_api_base_url)?;
-        return fetch_tagged_release(&client, &url, releases_url)
-            .await?
-            .with_context(|| {
-                format!("guest-OS version {version} was not found; check {releases_url}")
-            });
+        let (version, urls, releases_url) = tagged_release_location(version, release_api_base_url)?;
+        for url in &urls {
+            if let Some(release) = fetch_tagged_release(&client, url, releases_url).await? {
+                return Ok(release);
+            }
+        }
+        bail!("guest-OS version {version} was not found; check {releases_url}");
     }
 
     let api_base = release_api_base_url.trim().trim_end_matches('/');
@@ -642,10 +645,11 @@ async fn fetch_release(version: Option<&str>, release_api_base_url: &str) -> Res
         .json()
         .await
         .context("parsing dstack release list")?;
-    if let Some(release) = releases
-        .into_iter()
-        .find(|release| release.tag_name.starts_with(RELEASE_TAG_PREFIX))
-    {
+    if let Some(release) = releases.into_iter().find(|release| {
+        RELEASE_TAG_PREFIXES
+            .iter()
+            .any(|prefix| release.tag_name.starts_with(prefix))
+    }) {
         return Ok(release);
     }
 
@@ -655,27 +659,33 @@ async fn fetch_release(version: Option<&str>, release_api_base_url: &str) -> Res
         .with_context(|| format!("no guest-OS release found; check {RELEASES_URL}"))
 }
 
+/// The release lookup URLs for a pinned version, in the order to try them.
 fn tagged_release_location(
     version: &str,
     release_api_base_url: &str,
-) -> Result<(String, String, &'static str)> {
-    let version = version
-        .trim_start_matches(RELEASE_TAG_PREFIX)
+) -> Result<(String, Vec<String>, &'static str)> {
+    let version = RELEASE_TAG_PREFIXES
+        .iter()
+        .find_map(|prefix| version.strip_prefix(prefix))
+        .unwrap_or(version)
         .trim_start_matches('v');
     let core = numeric_version_core(version)?;
-    let (repo, tag_prefix, releases_url) = if core < MONOREPO_GUEST_OS_MIN_VERSION {
-        (LEGACY_REPO, "v", LEGACY_RELEASES_URL)
+    let api_base = release_api_base_url.trim().trim_end_matches('/');
+    let (urls, releases_url) = if core < MONOREPO_GUEST_OS_MIN_VERSION {
+        (
+            vec![format!("{api_base}/{LEGACY_REPO}/releases/tags/v{version}")],
+            LEGACY_RELEASES_URL,
+        )
     } else {
-        (REPO, RELEASE_TAG_PREFIX, RELEASES_URL)
+        (
+            RELEASE_TAG_PREFIXES
+                .iter()
+                .map(|prefix| format!("{api_base}/{REPO}/releases/tags/{prefix}{version}"))
+                .collect(),
+            RELEASES_URL,
+        )
     };
-    Ok((
-        version.to_string(),
-        format!(
-            "{}/{repo}/releases/tags/{tag_prefix}{version}",
-            release_api_base_url.trim().trim_end_matches('/')
-        ),
-        releases_url,
-    ))
+    Ok((version.to_string(), urls, releases_url))
 }
 
 fn numeric_version_core(version: &str) -> Result<(u64, u64, u64)> {
@@ -721,7 +731,8 @@ async fn fetch_tagged_release(
     ))
 }
 
-/// Pick a full bare-metal image tarball, never the `-uki` archive. For a GPU
+/// Pick a full bare-metal image tarball, never the `-uki` or `-kernel-devel`
+/// archive. For a GPU
 /// request, prefer a legacy `dstack-nvidia-*` asset when present and otherwise
 /// use the current unified image (which already contains conditional NVIDIA
 /// support).
@@ -734,7 +745,11 @@ fn pick_asset(assets: &[Asset], gpu: bool) -> Option<&Asset> {
         |n: &str| n.starts_with("dstack-dev-") || n.starts_with("dstack-nvidia-dev-");
     let matches = |a: &&Asset, want_legacy_gpu: bool| {
         let n = a.name.as_str();
-        if !n.ends_with(".tar.gz") || n.ends_with("-uki.tar.gz") || is_dev_flavour(n) {
+        if !n.ends_with(".tar.gz")
+            || n.ends_with("-uki.tar.gz")
+            || n.ends_with("-kernel-devel.tar.gz")
+            || is_dev_flavour(n)
+        {
             return false;
         }
         let is_gpu = n.starts_with("dstack-nvidia-");
@@ -894,27 +909,54 @@ mod tests {
     }
 
     #[test]
+    fn kernel_devel_archive_is_never_selected_as_a_host_image() {
+        let assets = vec![
+            asset("dstack-0.6.5-kernel-devel.tar.gz"),
+            asset("dstack-0.6.5-uki.tar.gz"),
+            asset("dstack-0.6.5.tar.gz"),
+        ];
+        assert_eq!(
+            pick_asset(&assets, false).map(|a| a.name.as_str()),
+            Some("dstack-0.6.5.tar.gz")
+        );
+        assert_eq!(
+            pick_asset(&assets, true).map(|a| a.name.as_str()),
+            Some("dstack-0.6.5.tar.gz")
+        );
+    }
+
+    #[test]
     fn routes_pinned_releases_at_the_monorepo_boundary() {
-        for version in ["0.5.11", "v0.5.11", "guest-os-v0.5.11"] {
-            let (normalized, url, releases_url) =
+        for version in ["0.5.11", "v0.5.11", "guest-os-v0.5.11", "mkosi-os-v0.5.11"] {
+            let (normalized, urls, releases_url) =
                 tagged_release_location(version, crate::cli::DEFAULT_RELEASE_API_BASE_URL).unwrap();
             assert_eq!(normalized, "0.5.11");
             assert_eq!(
-                url,
-                "https://api.github.com/repos/Dstack-TEE/meta-dstack/releases/tags/v0.5.11"
+                urls,
+                ["https://api.github.com/repos/Dstack-TEE/meta-dstack/releases/tags/v0.5.11"]
             );
             assert_eq!(releases_url, LEGACY_RELEASES_URL);
         }
 
         for version in ["0.6.0", "0.6.0.a2", "1.0.0"] {
-            let (normalized, url, releases_url) =
-                tagged_release_location(version, crate::cli::DEFAULT_RELEASE_API_BASE_URL).unwrap();
-            assert_eq!(normalized, version);
-            assert_eq!(
-                url,
-                format!("https://api.github.com/repos/Dstack-TEE/dstack/releases/tags/guest-os-v{version}")
-            );
-            assert_eq!(releases_url, RELEASES_URL);
+            for input in [
+                version.to_string(),
+                format!("mkosi-os-v{version}"),
+                format!("guest-os-v{version}"),
+            ] {
+                let (normalized, urls, releases_url) =
+                    tagged_release_location(&input, crate::cli::DEFAULT_RELEASE_API_BASE_URL)
+                        .unwrap();
+                assert_eq!(normalized, version);
+                assert_eq!(
+                    urls,
+                    [
+                        format!("https://api.github.com/repos/Dstack-TEE/dstack/releases/tags/mkosi-os-v{version}"),
+                        format!("https://api.github.com/repos/Dstack-TEE/dstack/releases/tags/guest-os-v{version}"),
+                    ]
+                );
+                assert_eq!(releases_url, RELEASES_URL);
+            }
         }
     }
 
@@ -930,11 +972,11 @@ mod tests {
 
     #[test]
     fn release_api_base_url_is_configurable_and_trailing_slash_safe() {
-        let (_, url, _) =
+        let (_, urls, _) =
             tagged_release_location("0.6.0", "  http://127.0.0.1:1234/api/  ").unwrap();
         assert_eq!(
-            url,
-            "http://127.0.0.1:1234/api/Dstack-TEE/dstack/releases/tags/guest-os-v0.6.0"
+            urls[0],
+            "http://127.0.0.1:1234/api/Dstack-TEE/dstack/releases/tags/mkosi-os-v0.6.0"
         );
     }
 
