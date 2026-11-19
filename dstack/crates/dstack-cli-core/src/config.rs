@@ -483,6 +483,23 @@ mod tests {
     }
 
     #[test]
+    fn vmm_toml_port_mapping_allows_auto_picked_host_ports() {
+        let rendered: toml::Value = toml::from_str(&vmm_toml(&VmmRender::default())).unwrap();
+        let ranges = rendered["cvm"]["port_mapping"]["range"].as_array().unwrap();
+        let covered = ranges.iter().any(|r| {
+            r["protocol"].as_str() == Some("tcp")
+                && r["from"].as_integer().unwrap()
+                    <= i64::from(*crate::ports::AUTO_HOST_PORT_RANGE.start())
+                && r["to"].as_integer().unwrap()
+                    >= i64::from(*crate::ports::AUTO_HOST_PORT_RANGE.end())
+        });
+        assert!(
+            covered,
+            "port_mapping must cover ports::AUTO_HOST_PORT_RANGE"
+        );
+    }
+
+    #[test]
     fn vmm_toml_auth_disabled_renders_empty_tokens() {
         let rendered = vmm_toml(&VmmRender::default());
         // default (no token) must still be valid TOML with an empty token list.
