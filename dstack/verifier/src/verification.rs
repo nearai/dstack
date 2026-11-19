@@ -1186,6 +1186,7 @@ mod tests {
 
     fn snp_report(tcb_status: &str, advisory_ids: &[&str]) -> VerifiedAmdSnpReport {
         VerifiedAmdSnpReport {
+            product: sev_snp_qvl::AmdSnpProduct::Milan,
             measurement: [0; 48],
             report_data: [0; 64],
             host_data: [0; 32],

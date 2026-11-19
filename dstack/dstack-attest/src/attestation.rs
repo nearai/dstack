@@ -60,7 +60,7 @@ pub struct AttestationVerifierConfig {
     pub allowed_collateral_hosts: Option<Vec<String>>,
     /// AMD SEV-SNP has no vendor TCB status, so it is judged against these
     /// bulletins. A report below one lists it in `advisory_ids` and is
-    /// `OutOfDate`; with none for its product, its status is empty.
+    /// `OutOfDate`, as is one with none for its product.
     #[serde(default)]
     pub sev_snp_tcb_requirements: Vec<SevSnpTcbRequirement>,
 }
@@ -119,6 +119,13 @@ impl TryFrom<&SevSnpTcbRequirement> for sev_snp_qvl::AmdSnpTcbRequirement {
             },
         })
     }
+}
+
+/// Parse `sev_snp_tcb_requirements` from the JSON list governance publishes.
+pub fn sev_snp_tcb_requirements_from_json(
+    json: &str,
+) -> Result<Vec<sev_snp_qvl::AmdSnpTcbRequirement>> {
+    sev_snp_tcb_requirements(&serde_json::from_str::<Vec<SevSnpTcbRequirement>>(json)?)
 }
 
 fn sev_snp_tcb_requirements(

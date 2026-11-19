@@ -343,6 +343,12 @@ sent. The KMS method checks the KMS policy; the app method applies registered ap
 policy.
 KMS callers do not fetch contract metadata to decide which policy to use.
 
+Before authorizing an SEV-SNP attestation, the KMS reads
+`GET /sevSnpTcbRequirements`, reusing the answer for a second. `requirements` is
+the JSON list of AMD bulletins it judges the TCB status against. With an empty
+one, or a backend without the route, every SEV-SNP TCB is `OutOfDate`. See
+[AMD SEV-SNP](../../docs/amd-sev-snp.md).
+
 `requestedAppEpoch` selects the application's own key epoch, independently of KMS
 root epochs. Omission uses `currentAppEpoch`; explicit zero selects app epoch zero.
 Solidity uses `OptionalUint256 { isSet, value }` for both selectors. Future epochs

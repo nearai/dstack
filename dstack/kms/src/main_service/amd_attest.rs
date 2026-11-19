@@ -318,6 +318,7 @@ mod tests {
             config: String::new(),
             report: ra_tls::attestation::DstackVerifiedReport::DstackAmdSevSnp(
                 dstack_attest::amd_sev_snp::VerifiedAmdSnpReport {
+                    product: dstack_attest::amd_sev_snp::AmdSnpProduct::Milan,
                     measurement,
                     report_data: [0x42; 64],
                     host_data: MrConfigV3::snp_host_data_from_document(
@@ -433,6 +434,7 @@ mod tests {
             config: String::new(),
             report: ra_tls::attestation::DstackVerifiedReport::DstackAmdSevSnp(
                 dstack_attest::amd_sev_snp::VerifiedAmdSnpReport {
+                    product: dstack_attest::amd_sev_snp::AmdSnpProduct::Milan,
                     measurement: verified,
                     report_data: [0x42; 64],
                     host_data: MrConfigV3::snp_host_data_from_document(&mr_config_document),

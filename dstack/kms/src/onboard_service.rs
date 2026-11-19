@@ -359,6 +359,7 @@ mod tests {
             config: String::new(),
             report: ra_tls::attestation::DstackVerifiedReport::DstackAmdSevSnp(
                 dstack_attest::amd_sev_snp::VerifiedAmdSnpReport {
+                    product: dstack_attest::amd_sev_snp::AmdSnpProduct::Milan,
                     measurement,
                     report_data: [0x42; 64],
                     host_data: mr_config.to_snp_host_data(),

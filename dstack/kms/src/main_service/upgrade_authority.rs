@@ -2,19 +2,22 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use super::build_boot_info_for_attestation;
+use super::{build_boot_info_for_attestation, short_lived_cache};
 use crate::config::{AuthApi, KmsConfig};
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use dstack_attest::amd_sev_snp::AmdSnpTcbRequirement;
+use dstack_attest::attestation::sev_snp_tcb_requirements_from_json;
 use dstack_guest_agent_rpc::v0::{
     dstack_guest_client::DstackGuestClient, AttestResponse, RawQuoteArgs,
 };
 use dstack_types::authorization;
 pub(crate) use dstack_types::authorization::AuthorizationOperation as Operation;
 use http_client::prpc::PrpcClient;
+use moka::future::Cache;
 use ra_tls::attestation::{AttestationVerifier, VerifiedAttestation, VersionedAttestation};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 /// The KMS `bootAuth` payload. This is the verifier's `PolicyBootInfo` — the one
@@ -65,7 +68,10 @@ fn ensure_identity_widths(boot_info: &BootInfo) -> Result<()> {
     Ok(())
 }
 
-pub(crate) async fn local_kms_boot_info(verifier: &AttestationVerifier) -> Result<BootInfo> {
+pub(crate) async fn local_kms_boot_info(
+    auth_api: &AuthApi,
+    verifier: &AttestationVerifier,
+) -> Result<BootInfo> {
     let response = app_attest(pad64([0u8; 32]))
         .await
         .context("Failed to get local KMS attestation")?;
@@ -76,7 +82,7 @@ pub(crate) async fn local_kms_boot_info(verifier: &AttestationVerifier) -> Resul
         .verify(verifier)
         .await
         .context("Failed to verify local KMS attestation")?;
-    build_boot_info_for_attestation(&verified, false, "")
+    auth_api.boot_info(&verified, false, "").await
 }
 
 #[cfg(test)]
@@ -275,6 +281,60 @@ async fn send_request<R: DeserializeOwned>(req: reqwest::RequestBuilder, url: &s
 }
 
 impl AuthApi {
+    /// The boot info an authorization judges. An SEV-SNP TCB is judged against
+    /// the AMD bulletins governance publishes, not the verifier's own.
+    pub async fn boot_info(
+        &self,
+        att: &VerifiedAttestation,
+        use_boottime_mr: bool,
+        vm_config: &str,
+    ) -> Result<BootInfo> {
+        let mut boot_info = build_boot_info_for_attestation(att, use_boottime_mr, vm_config)?;
+        if let Some(report) = att.report.amd_snp_report() {
+            let requirements = self
+                .sev_snp_tcb_requirements()
+                .await
+                .context("failed to read the SEV-SNP TCB requirements from the auth API")?;
+            (boot_info.tcb_status, boot_info.advisory_ids) = report.assess(&requirements);
+        }
+        Ok(boot_info)
+    }
+
+    /// Reused for [`AUTH_API_CACHE_TTL`]; failures are not cached. Empty, which
+    /// leaves every SEV-SNP TCB `OutOfDate`, when governance publishes none: in
+    /// dev mode, and from a backend without the route.
+    async fn sev_snp_tcb_requirements(&self) -> Result<Vec<AmdSnpTcbRequirement>> {
+        #[derive(Deserialize)]
+        struct Response {
+            requirements: String,
+        }
+        static CACHE: OnceLock<Cache<String, Vec<AmdSnpTcbRequirement>>> = OnceLock::new();
+        let AuthApi::Webhook { webhook } = self else {
+            return Ok(Vec::new());
+        };
+        let url = url_join(&webhook.url, "sevSnpTcbRequirements");
+        let fetch = async {
+            let response = auth_api_client()
+                .get(&url)
+                .timeout(webhook.timeout)
+                .send()
+                .await?;
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                return Ok(Vec::new());
+            }
+            let Response { requirements } = response.error_for_status()?.json().await?;
+            if requirements.is_empty() {
+                return Ok(Vec::new());
+            }
+            sev_snp_tcb_requirements_from_json(&requirements)
+        };
+        CACHE
+            .get_or_init(|| short_lived_cache(1))
+            .try_get_with(url.clone(), fetch)
+            .await
+            .map_err(|err: Arc<anyhow::Error>| anyhow!("{err:#}"))
+    }
+
     pub async fn authorize_kms(
         &self,
         app_info: &BootInfo,
@@ -520,7 +580,7 @@ pub(crate) async fn ensure_self_kms_allowed(
     if !cfg.enforce_self_authorization {
         return Ok(());
     }
-    let boot_info = local_kms_boot_info(verifier)
+    let boot_info = local_kms_boot_info(&cfg.auth_api, verifier)
         .await
         .context("failed to build local KMS boot info")?;
     let response = cfg
@@ -549,7 +609,10 @@ pub(crate) async fn ensure_kms_allowed(
     attestation: &VerifiedAttestation,
     root_epoch: u32,
 ) -> Result<RootEpochRegistration> {
-    let boot_info = build_boot_info_for_attestation(attestation, false, "")
+    let boot_info = cfg
+        .auth_api
+        .boot_info(attestation, false, "")
+        .await
         .context("failed to build KMS boot info from attestation")?;
     ensure_source_os_image(&boot_info)?;
     let response = cfg
@@ -606,25 +669,39 @@ pub(crate) mod tests {
         }
     }
 
+    /// Answers each authorization request in turn, as a backend that predates
+    /// `sevSnpTcbRequirements`.
     pub(crate) fn serve<S: Into<String>>(
         responses: Vec<S>,
     ) -> (String, thread::JoinHandle<Vec<(String, Value)>>) {
-        serve_with_status(responses.into_iter().map(|body| (200, body)).collect())
+        serve_routes(
+            responses.into_iter().map(|body| (200, body)).collect(),
+            false,
+        )
     }
 
-    /// Like [`serve`], answering each request with its own HTTP status.
+    /// Like [`serve`], answering every request in turn with its own HTTP status.
     pub(crate) fn serve_with_status<S: Into<String>>(
         responses: Vec<(u16, S)>,
     ) -> (String, thread::JoinHandle<Vec<(String, Value)>>) {
-        let responses: Vec<(u16, String)> = responses
+        serve_routes(responses, true)
+    }
+
+    fn serve_routes<S: Into<String>>(
+        responses: Vec<(u16, S)>,
+        serves_tcb_requirements: bool,
+    ) -> (String, thread::JoinHandle<Vec<(String, Value)>>) {
+        let mut responses = responses
             .into_iter()
             .map(|(status, body)| (status, body.into()))
-            .collect();
+            .collect::<Vec<(u16, String)>>()
+            .into_iter()
+            .peekable();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let handle = thread::spawn(move || {
             let mut requests = Vec::new();
-            for (status, response) in responses {
+            while responses.peek().is_some() {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut request = Vec::new();
                 let mut chunk = [0u8; 4096];
@@ -666,7 +743,13 @@ pub(crate) mod tests {
                 } else {
                     serde_json::from_slice(body).unwrap()
                 };
-                requests.push((path, body));
+                let (status, response) =
+                    if path == "/sevSnpTcbRequirements" && !serves_tcb_requirements {
+                        (404, String::new())
+                    } else {
+                        requests.push((path, body));
+                        responses.next().unwrap()
+                    };
                 write!(
                     stream,
                     "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",

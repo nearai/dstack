@@ -474,7 +474,7 @@ fn configured_tcb_requirements_judge_the_real_report() {
     };
 
     let unconfigured = verify(&[]);
-    assert_eq!(unconfigured.tcb_status, "");
+    assert_eq!(unconfigured.tcb_status, "OutOfDate");
     assert!(unconfigured.advisory_ids.is_empty());
 
     let met = verify(&[requirement("AMD-SB-MET", reported.microcode)]);

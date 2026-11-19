@@ -135,18 +135,36 @@ and current, and rejects a revoked ASK. This applies whether the evidence
 carries its certificates or the verifier fetches them, so a KDS mirror must
 serve the CRL too.
 
-AMD publishes no TCB status for SNP, so the verifier judges the report against
-the bulletins configured in `sev_snp_tcb_requirements` (`[core.attestation]` in
-`kms.toml`, `[attestation]` in `dstack-verifier.toml`; keep the two identical).
-Each one names an AMD security bulletin and the minimum TCB that fixes it on one
-product family; Turin entries also set `fmc`. A bulletin whose minimum the reported,
-committed or launch TCB does not meet appears in `BootInfo.advisory_ids`. The
-reported TCB is the one the VCEK certifies, and the committed TCB bounds a
-firmware rollback. `BootInfo.tcb_status` is `UpToDate` when every listed
-bulletin is met, `OutOfDate` otherwise, and empty when none is listed for the
-product. `DstackKms` accepts only `UpToDate` from a KMS instance, as does
-`DstackApp` with `requireTcbUpToDate`, so list the bulletins before you deploy
-SEV-SNP. No report field shows firmware that was downgraded and upgraded again
+AMD publishes no TCB status for SNP, so a report is judged against a list of
+AMD security bulletins. Each entry names a bulletin and the minimum TCB that
+fixes it on one product family (`milan`, `genoa` or `turin`); Turin entries
+also set `fmc`:
+
+```json
+[{"product":"milan","advisory_id":"AMD-SB-XXXX","bootloader":0,"tee":0,"snp":0,"microcode":0}]
+```
+
+A bulletin whose minimum the reported, committed or launch TCB does not meet
+appears in `BootInfo.advisory_ids`. The reported TCB is the one the VCEK
+certifies, and the committed TCB bounds a firmware rollback.
+`BootInfo.tcb_status` is `UpToDate` when every bulletin listed for the product
+is met, and `OutOfDate` otherwise, including when none is listed. `DstackKms`
+accepts only `UpToDate` from a KMS instance, as does `DstackApp` with
+`requireTcbUpToDate`, so publish the list before you deploy SEV-SNP.
+
+The KMS reads the list from its auth API for every SEV-SNP authorization,
+reusing it for a second, and does not take one from `kms.toml`:
+
+- With on-chain governance, publish it in `DstackKms` with
+  `setSevSnpTcbRequirements` (see [On-chain governance](./onchain-governance.md)).
+- With `dstack-auth`, list the entries under `sevSnpTcbRequirements` (see
+  [dstack-auth operations](./dstack-auth-operations.md)).
+
+A list the KMS cannot read or parse fails the request. `dstack-verifier` does
+not read the auth API: configure the same entries in
+`[[attestation.sev_snp_tcb_requirements]]` of `dstack-verifier.toml`.
+
+No report field shows firmware that was downgraded and upgraded again
 while the guest ran, as long as the committed TCB stayed at the minimum.
 
 ## KMS key-release policy
@@ -208,5 +226,5 @@ AMD signatures.
   response and `core.sev_snp_key_release`; either gate can deny the request.
 - **TCB is `OutOfDate`:** `advisory_ids` names the bulletins the TCB misses.
   Update the platform firmware before changing the auth policy.
-- **TCB status is empty:** no `sev_snp_tcb_requirements` entry is listed for the
-  report's product family.
+  With no `advisory_ids`, no bulletin is listed for the report's product
+  family: publish the list.

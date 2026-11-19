@@ -131,7 +131,7 @@ impl QuoteVerifier {
     }
 
     /// Judge `tcb_status` and `advisory_ids` against these requirements. A
-    /// product without any requirement reports an empty status.
+    /// product without any requirement is `OutOfDate`.
     pub fn with_tcb_requirements(mut self, requirements: Vec<AmdSnpTcbRequirement>) -> Self {
         self.tcb_requirements = requirements;
         self
@@ -388,10 +388,12 @@ impl AmdSnpTcbInfo {
                 advisory_ids.push(requirement.advisory_id.clone());
             }
         }
-        let status = match (configured, advisory_ids.is_empty()) {
-            (false, _) => "",
-            (true, true) => "UpToDate",
-            (true, false) => "OutOfDate",
+        // Without a requirement for the product there is nothing to call it
+        // up to date against.
+        let status = if configured && advisory_ids.is_empty() {
+            "UpToDate"
+        } else {
+            "OutOfDate"
         };
         (status.to_string(), advisory_ids)
     }
@@ -399,16 +401,25 @@ impl AmdSnpTcbInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedAmdSnpReport {
+    pub product: AmdSnpProduct,
     pub measurement: [u8; 48],
     pub report_data: [u8; 64],
     pub host_data: [u8; 32],
     pub chip_id: [u8; 64],
     pub tcb_info: AmdSnpTcbInfo,
-    /// `UpToDate` or `OutOfDate` against the verifier's TCB requirements, or
-    /// empty when none is configured for the product.
+    /// `UpToDate` against the verifier's TCB requirements, and `OutOfDate`
+    /// below one or with none configured for the product.
     pub tcb_status: String,
     /// The bulletins whose minimum TCB the report does not meet.
     pub advisory_ids: Vec<String>,
+}
+
+impl VerifiedAmdSnpReport {
+    /// The TCB status and unmet bulletins against `requirements` rather than
+    /// the verifier's own.
+    pub fn assess(&self, requirements: &[AmdSnpTcbRequirement]) -> (String, Vec<String>) {
+        self.tcb_info.assess(self.product, requirements)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -747,6 +758,7 @@ fn verify_amd_snp_attestation_with_cert_chain(
     let (tcb_status, advisory_ids) = tcb_info.assess(product, tcb_requirements);
 
     Ok(VerifiedAmdSnpReport {
+        product,
         measurement: parsed.measurement,
         report_data: parsed.report_data,
         host_data: parsed.host_data,
@@ -1525,10 +1537,10 @@ mod tests {
 
         let assess =
             |requirements: &[AmdSnpTcbRequirement]| info.assess(AmdSnpProduct::Milan, requirements);
-        assert_eq!(assess(&[]), (String::new(), vec![]));
+        assert_eq!(assess(&[]), ("OutOfDate".into(), vec![]));
         assert_eq!(
             assess(std::slice::from_ref(&other)),
-            (String::new(), vec![])
+            ("OutOfDate".into(), vec![])
         );
         assert_eq!(assess(&[met.clone(), other]), ("UpToDate".into(), vec![]));
         assert_eq!(

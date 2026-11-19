@@ -606,7 +606,8 @@ impl RpcHandler {
         self.ensure_self_allowed(Operation::KmsExportKeys)
             .await
             .context("KMS self authorization failed")?;
-        let info = build_boot_info_for_attestation(att, false, &request.vm_config)?;
+        let auth_api = &self.state.config.auth_api;
+        let info = auth_api.boot_info(att, false, &request.vm_config).await?;
         let result = async {
             self.ensure_kms_allowed(att, &info, &request.vm_config, &request.launch_ticket)
                 .await?;
@@ -737,7 +738,13 @@ impl RpcHandler {
         let boot_info = self
             .state
             .self_boot_info
-            .try_get_with((), local_kms_boot_info(&self.state.attestation_verifier))
+            .try_get_with(
+                (),
+                local_kms_boot_info(
+                    &self.state.config.auth_api,
+                    &self.state.attestation_verifier,
+                ),
+            )
             .await
             .map_err(|err| anyhow!("{err:#}"))
             .context("Failed to load cached self boot info")?;
@@ -894,7 +901,8 @@ impl KmsRpc for RpcHandler {
         self.ensure_self_allowed(Operation::KmsServe)
             .await
             .context("KMS self authorization failed")?;
-        let boot_info = build_boot_info_for_attestation(att, false, &request.vm_config)?;
+        let auth_api = &self.state.config.auth_api;
+        let boot_info = auth_api.boot_info(att, false, &request.vm_config).await?;
         let result = async {
             let BootConfig {
                 boot_info,
@@ -1127,7 +1135,10 @@ impl KmsRpc for RpcHandler {
             .verify_with_ra_pubkey(&csr.pubkey, &self.state.attestation_verifier)
             .await
             .context("Quote verification failed")?;
-        let boot_info = build_boot_info_for_attestation(&attestation, true, &request.vm_config)?;
+        let auth_api = &self.state.config.auth_api;
+        let boot_info = auth_api
+            .boot_info(&attestation, true, &request.vm_config)
+            .await?;
         let result = async {
             let app_info = self
                 .ensure_app_attestation_allowed(
@@ -1289,6 +1300,7 @@ mod tests {
             config,
             report: ra_tls::attestation::DstackVerifiedReport::DstackAmdSevSnp(
                 dstack_attest::amd_sev_snp::VerifiedAmdSnpReport {
+                    product: dstack_attest::amd_sev_snp::AmdSnpProduct::Milan,
                     measurement,
                     report_data: [0x42; 64],
                     host_data: mr_config.to_snp_host_data(),
@@ -1751,6 +1763,58 @@ mod tests {
         let attestation = verified_snp_attestation(measurement, [0xab; 64]);
         let vm_config = snp_vm_config(&input, &mr_config);
         build_boot_info_for_attestation(&attestation, false, &vm_config).unwrap()
+    }
+
+    #[rocket::async_test]
+    async fn sev_snp_tcb_is_judged_against_governances_requirements() {
+        use serde_json::json;
+        use upgrade_authority::tests::{serve_with_status, webhook};
+
+        let input = valid_snp_measurement_input();
+        let measurement = compute_expected_measurement(&input).unwrap();
+        let attestation = verified_snp_attestation(measurement, [0xab; 64]);
+        let vm_config = snp_vm_config(&input, &valid_snp_mr_config());
+        // The verifier's own status is not the one judged.
+        assert_eq!(
+            attestation.report.amd_snp_report().unwrap().tcb_status,
+            "UpToDate"
+        );
+        let published = |bootloader: u8| {
+            let requirements = json!([{
+                "product": "milan", "advisory_id": "AMD-SB-1",
+                "bootloader": bootloader, "tee": 0, "snp": 0, "microcode": 0,
+            }]);
+            (
+                200,
+                json!({ "requirements": requirements.to_string() }).to_string(),
+            )
+        };
+        let none = (200, json!({ "requirements": "" }).to_string());
+        let unparsable = (200, json!({ "requirements": "[{}]" }).to_string());
+        // Each case has its own backend: the list is cached per backend.
+        for (response, expected) in [
+            (published(0), Some(("UpToDate", vec![]))),
+            (published(1), Some(("OutOfDate", vec!["AMD-SB-1"]))),
+            (none, Some(("OutOfDate", vec![]))),
+            // A backend without the route publishes none.
+            ((404, String::new()), Some(("OutOfDate", vec![]))),
+            // An unavailable or unparsable list fails the request.
+            ((503, String::new()), None),
+            (unparsable, None),
+        ] {
+            let (url, server) = serve_with_status(vec![response]);
+            let judged = webhook(url)
+                .boot_info(&attestation, false, &vm_config)
+                .await;
+            assert_eq!(
+                judged.ok().map(|info| (info.tcb_status, info.advisory_ids)),
+                expected.map(|(status, ids)| (
+                    status.to_string(),
+                    ids.into_iter().map(String::from).collect()
+                )),
+            );
+            assert_eq!(server.join().unwrap()[0].0, "/sevSnpTcbRequirements");
+        }
     }
 
     #[test]
