@@ -75,9 +75,13 @@ pub(crate) fn auth_unit_file(bin: &str, allowlist: &Path, port: u16, prefix: &Pa
 pub(crate) fn vmm_unit_file(bin: &str, config: &Path, prefix: &Path, auth_unit: &str) -> String {
     // KillMode defaults to control-group, so `systemctl stop` tears down the
     // VMM + supervisor + CVM qemus together (deterministic teardown).
+    //
+    // The host API listens on vsock CID 2, which only exists once the
+    // vhost_vsock transport is loaded. /dev/vhost-vsock is a static device node
+    // that loads the module on first open, so it can exist without the module.
     format!(
         "[Unit]\nDescription=dstack VMM\nAfter=network.target docker.service {auth}.service\nWants={auth}.service\n\n\
-         [Service]\nExecStart={bin} -c {cfg}\nRestart=always\nRestartSec=2\n\
+         [Service]\nExecStartPre=/sbin/modprobe vhost_vsock\nExecStart={bin} -c {cfg}\nRestart=always\nRestartSec=2\n\
          TimeoutStopSec=120\nWorkingDirectory={wd}\n\n\
          [Install]\nWantedBy=multi-user.target\n",
         auth = auth_unit,
@@ -133,6 +137,15 @@ mod tests {
             );
         }
         assert_eq!(systemd_path("/srv/100%"), "/srv/100%%");
+    }
+
+    #[test]
+    fn vmm_unit_loads_vhost_vsock_first() {
+        let unit = vmm_unit_file("/bin/vmm", Path::new("/etc/vmm.toml"), Path::new("/d"), "a");
+        let pre = unit
+            .find("ExecStartPre=/sbin/modprobe vhost_vsock\n")
+            .unwrap();
+        assert!(pre < unit.find("ExecStart=").unwrap());
     }
 
     #[test]
