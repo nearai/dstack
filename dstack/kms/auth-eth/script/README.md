@@ -83,6 +83,16 @@ KMS_CONTRACT_ADDR=0x... LAUNCH_TICKET_HASH=$LAUNCH_TICKET_HASH \
 forge script script/Manage.s.sol:RemoveKmsLaunchTicket --broadcast --rpc-url $RPC_URL
 ```
 
+#### Set SEV-SNP TCB Requirements
+The AMD bulletins an SEV-SNP TCB must meet to report `UpToDate`, as a JSON list
+(see [AMD SEV-SNP](../../../../docs/amd-sev-snp.md)). While it is empty, every
+SEV-SNP TCB is `OutOfDate`.
+```bash
+KMS_CONTRACT_ADDR=0x... \
+SEV_SNP_TCB_REQUIREMENTS='[{"product":"milan","advisory_id":"AMD-SB-XXXX","bootloader":0,"tee":0,"snp":0,"microcode":0}]' \
+forge script script/Manage.s.sol:SetSevSnpTcbRequirements --broadcast --rpc-url $RPC_URL
+```
+
 #### Set Gateway App ID
 ```bash
 KMS_CONTRACT_ADDR=0x... GATEWAY_APP_ID="my-gateway" \

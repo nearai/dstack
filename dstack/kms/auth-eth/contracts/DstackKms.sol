@@ -102,6 +102,10 @@ contract DstackKms is Initializable, Ownable2StepUpgradeable, UUPSUpgradeable, E
     // Allowed KMS launch tickets, by sha256("dstack-launch-ticket/v1:" || ticket).
     EnumerableSet.Bytes32Set private _kmsLaunchTickets;
 
+    /// @notice The AMD bulletins an SEV-SNP TCB must meet to report "UpToDate", as the JSON list the KMS
+    /// parses: AMD publishes no TCB status. Covers every root epoch. While empty, every one is "OutOfDate".
+    string public sevSnpTcbRequirements;
+
     event EpochPolicyChanged(bytes32 indexed policy, bytes32 indexed value, uint256 indexed epoch, bool enabled);
 
     error InvalidEpochCaPubkey();
@@ -137,6 +141,7 @@ contract DstackKms is Initializable, Ownable2StepUpgradeable, UUPSUpgradeable, E
     event GatewayAppIdSet(string gatewayAppId);
     event AllowAnyTeeVariantSet(bool allowAny);
     event AllowedTeeVariantsSet(string[] teeVariants);
+    event SevSnpTcbRequirementsSet(string requirements);
     event RequireKmsLaunchTicketSet(bool required);
     event KmsLaunchTicketAdded(bytes32 indexed ticketHash, string label);
     event KmsLaunchTicketRemoved(bytes32 indexed ticketHash);
@@ -324,6 +329,12 @@ contract DstackKms is Initializable, Ownable2StepUpgradeable, UUPSUpgradeable, E
         uint64 mask = TeeVariantPolicy.setAllowed(_teeVariants, teeVariants);
         emit AllowedTeeVariantsSet(teeVariants);
         _emitPolicy(keccak256("allowed-tee-variants"), bytes32(uint256(mask)), true);
+    }
+
+    function setSevSnpTcbRequirements(string calldata requirements) external onlyOwner {
+        sevSnpTcbRequirements = requirements;
+        emit SevSnpTcbRequirementsSet(requirements);
+        _emitPolicy(keccak256("sev-snp-tcb-requirements"), keccak256(bytes(requirements)), true);
     }
 
     function setRequireKmsLaunchTicket(bool required) external onlyOwner {
@@ -747,7 +758,7 @@ contract DstackKms is Initializable, Ownable2StepUpgradeable, UUPSUpgradeable, E
     }
 
     // Add storage gap for upgradeable contracts
-    uint256[40] private __gap;
+    uint256[39] private __gap;
 }
 
 function isContract(address addr) view returns (bool) {

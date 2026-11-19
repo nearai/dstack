@@ -454,6 +454,23 @@ contract DstackKmsTest is Test {
         assertEq(kms.gatewayAppId(), gatewayAppId);
     }
 
+    function test_SetSevSnpTcbRequirements() public {
+        string memory requirements = '[{"product":"milan","advisory_id":"AMD-SB-1"}]';
+        assertEq(kms.sevSnpTcbRequirements(), "");
+
+        vm.expectEmit(address(kms));
+        emit DstackKms.SevSnpTcbRequirementsSet(requirements);
+        vm.expectEmit(address(kms));
+        emit DstackKms.PolicyChanged(owner, keccak256("sev-snp-tcb-requirements"), keccak256(bytes(requirements)), true);
+        vm.prank(owner);
+        kms.setSevSnpTcbRequirements(requirements);
+        assertEq(kms.sevSnpTcbRequirements(), requirements);
+
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, user));
+        kms.setSevSnpTcbRequirements("");
+    }
+
     function test_AddAndRemoveKmsDevice() public {
         bytes32 deviceId = bytes32(uint256(999));
 

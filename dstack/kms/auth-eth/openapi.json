@@ -198,6 +198,31 @@
           }
         }
       }
+    },
+    "/sevSnpTcbRequirements": {
+      "get": {
+        "summary": "Read the AMD bulletins an SEV-SNP TCB must meet",
+        "responses": {
+          "200": {
+            "description": "The JSON list the KMS parses; empty when governance sets none",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "requirements"
+                  ],
+                  "properties": {
+                    "requirements": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
