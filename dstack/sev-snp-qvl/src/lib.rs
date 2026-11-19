@@ -1098,7 +1098,9 @@ fn amd_snp_product_candidates_for_report(report: &AttestationReport) -> Result<V
 fn amd_snp_product_from_report(report: &AttestationReport) -> Result<Option<AmdSnpProduct>> {
     match report.version {
         2 => return Ok(None),
-        3 => {}
+        // v5 (firmware 1.58+) adds the mitigation vectors; the fields used
+        // here are laid out as in v3.
+        3..=5 => {}
         version => bail!("unsupported amd sev-snp report version: {version}"),
     }
 
@@ -1216,7 +1218,7 @@ fn parse_certificate(cert: &CertBytes, name: &str) -> Result<Certificate> {
 }
 
 fn validate_amd_snp_report_policy(report: &AttestationReport) -> Result<()> {
-    if !matches!(report.version, 2 | 3) {
+    if !matches!(report.version, 2..=5) {
         bail!("unsupported amd sev-snp report version: {}", report.version);
     }
     if report.vmpl != 0 {
@@ -1901,6 +1903,23 @@ mod tests {
         let report = base_report();
 
         validate_amd_snp_report_policy(&report).unwrap();
+    }
+
+    #[test]
+    fn report_v5_is_accepted_and_newer_versions_are_not() {
+        let mut report = base_report();
+        report.version = 5;
+        report.cpuid_fam_id = Some(0x1a);
+        report.cpuid_mod_id = Some(0x02);
+        validate_amd_snp_report_policy(&report).unwrap();
+        assert_eq!(
+            amd_snp_product_candidates_for_report(&report).unwrap(),
+            vec![AmdSnpProduct::Turin]
+        );
+
+        report.version = 6;
+        assert!(validate_amd_snp_report_policy(&report).is_err());
+        assert!(amd_snp_product_candidates_for_report(&report).is_err());
     }
 
     fn base_report() -> AttestationReport {
