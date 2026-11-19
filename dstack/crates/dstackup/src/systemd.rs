@@ -68,7 +68,7 @@ pub(crate) fn auth_unit_file(bin: &str, allowlist: &Path, port: u16, prefix: &Pa
          [Install]\nWantedBy=multi-user.target\n",
         bin = systemd_arg(bin),
         cfg = systemd_arg(&allowlist.display().to_string()),
-        wd = systemd_arg(&prefix.display().to_string()),
+        wd = systemd_path(&prefix.display().to_string()),
     )
 }
 
@@ -83,8 +83,14 @@ pub(crate) fn vmm_unit_file(bin: &str, config: &Path, prefix: &Path, auth_unit: 
         auth = auth_unit,
         bin = systemd_arg(bin),
         cfg = systemd_arg(&config.display().to_string()),
-        wd = systemd_arg(&prefix.display().to_string()),
+        wd = systemd_path(&prefix.display().to_string()),
     )
+}
+
+/// `WorkingDirectory=` takes a bare absolute path; systemd does not unquote it
+/// (systemd 259 rejects a quoted value as "path is not absolute").
+fn systemd_path(value: &str) -> String {
+    value.replace('%', "%%")
 }
 
 fn systemd_arg(value: &str) -> String {
@@ -108,6 +114,26 @@ fn systemd_arg(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn working_directory_is_a_bare_path() {
+        let prefix = Path::new("/var/lib/dstack");
+        for unit in [
+            auth_unit_file("/bin/auth", Path::new("/etc/a.json"), 8001, prefix),
+            vmm_unit_file(
+                "/bin/vmm",
+                Path::new("/etc/vmm.toml"),
+                prefix,
+                "dstack-auth",
+            ),
+        ] {
+            assert!(
+                unit.contains("\nWorkingDirectory=/var/lib/dstack\n"),
+                "{unit}"
+            );
+        }
+        assert_eq!(systemd_path("/srv/100%"), "/srv/100%%");
+    }
 
     #[test]
     fn systemd_arg_quotes_paths_and_escapes_specifiers() {
