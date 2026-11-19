@@ -664,7 +664,11 @@ impl QemuCommandBuilder<'_> {
         let mut command = Command::new(&self.cfg.qemu_path);
         command.arg("-accel").arg("kvm");
         command.arg("-cpu").arg(if self.is_amd_sev_snp() {
-            "EPYC-v4"
+            // A named model gets QEMU's default 40 phys-bits (1 TiB), too small
+            // for the 64-bit MMIO window of large-BAR GPUs; `-cpu host` (TDX)
+            // already takes the host's. The CPUID page is not part of the SNP
+            // launch measurement, so this does not change it.
+            "EPYC-v4,host-phys-bits=on"
         } else {
             "host"
         });
@@ -1254,8 +1258,8 @@ mod tests {
     use super::{
         amd_sev_snp_memory_backend_arg, create_hd, fs, nic_fd_layout,
         parse_amd_sev_snp_qmp_capabilities, prepare_data_disk, qemu_img_create_args,
-        virtio_pci_device, Command, Path, PreparedQemuLaunch, PreparedVolume, QemuCommandBuilder,
-        VmConfig,
+        virtio_pci_device, AmdSevSnpLaunchParams, Command, Path, PreparedQemuLaunch,
+        PreparedVolume, QemuCommandBuilder, VmConfig,
     };
     use crate::app::image::{Image, ImageInfo};
     use crate::app::{needs_swtpm, GpuConfig, GpuSpec, Manifest, PortMapping, VmVolume, VmWorkDir};
@@ -1299,6 +1303,32 @@ mod tests {
         let params = parse_amd_sev_snp_qmp_capabilities(stdout).unwrap();
         assert_eq!(params.cbitpos, 51);
         assert_eq!(params.reduced_phys_bits, 1);
+    }
+
+    #[test]
+    fn amd_sev_snp_cpu_takes_host_phys_bits() {
+        let (config, mut vm, mut prepared) = test_launch_fixture();
+        vm.manifest.no_tee = false;
+        prepared.platform = CvmPlatform::AmdSevSnp;
+        prepared.snp_host_data = Some("00".repeat(32));
+        prepared.snp_launch_params = Some(AmdSevSnpLaunchParams {
+            cbitpos: 51,
+            reduced_phys_bits: 1,
+        });
+
+        let process = QemuCommandBuilder {
+            vm: &vm,
+            cfg: &config.cvm,
+            gpus: &GpuConfig::default(),
+            prepared: &prepared,
+        }
+        .build()
+        .unwrap();
+
+        assert!(process
+            .args
+            .windows(2)
+            .any(|args| args == ["-cpu", "EPYC-v4,host-phys-bits=on"]));
     }
 
     #[test]
