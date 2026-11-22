@@ -114,7 +114,7 @@ pub fn build_fs_image(fs_image: &Path, output: &Path, salt_hex: &str) -> Result<
 
     let tmp = tempfile::tempdir().context("creating volume scratch dir")?;
     let data_path = tmp.path().join("data.fs");
-    fs::copy(fs_image, &data_path)
+    clone_or_copy_file(fs_image, &data_path)
         .with_context(|| format!("copying {} into scratch", fs_image.display()))?;
     seal_data_image(&data_path, len, output, salt_hex)
 }
@@ -368,19 +368,66 @@ fn write_volume_header(out: &mut fs::File, offset: u64, root_hash: &str) -> Resu
     Ok(())
 }
 
+/// Place `src` in `out` at `offset`. On a filesystem with reflinks (XFS,
+/// Btrfs) the extents are shared instead of written again (the partitions are
+/// 1 MiB aligned and the inputs are padded to whole blocks), so packing a
+/// large directory needs no second copy of it on disk. Elsewhere it copies.
 fn copy_into(src: &Path, out: &mut fs::File, offset: u64) -> Result<()> {
-    use std::io::{Read, Seek, SeekFrom, Write};
+    use std::io::{Seek, SeekFrom};
     let mut input = fs::File::open(src)?;
-    out.seek(SeekFrom::Start(offset))?;
-    let mut buf = vec![0u8; 1 << 20];
-    loop {
-        let n = input.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        out.write_all(&buf[..n])?;
+    if clone_range(input.file(), out.file(), offset).is_ok() {
+        return Ok(());
     }
+    out.seek(SeekFrom::Start(offset))?;
+    std::io::copy(&mut input, out)?;
     Ok(())
+}
+
+/// Copy `src` to a new file `dst`, sharing extents where the filesystem can.
+fn clone_or_copy_file(src: &Path, dst: &Path) -> Result<()> {
+    let input = fs::File::open(src)?;
+    let output = fs::File::create(dst)?;
+    if clone_range(input.file(), output.file(), 0).is_ok() {
+        return Ok(());
+    }
+    drop(output);
+    fs::copy(src, dst)?;
+    Ok(())
+}
+
+/// `FICLONERANGE` of all of `src` (`src_length` 0: to its end) into `dst` at
+/// `dest_offset`. `copy_file_range` does not reliably reflink (not on Linux
+/// 7.0 with XFS), so this asks for the clone explicitly.
+#[cfg(target_os = "linux")]
+fn clone_range(src: &std::fs::File, dst: &std::fs::File, dest_offset: u64) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    #[repr(C)]
+    struct FileCloneRange {
+        src_fd: i64,
+        src_offset: u64,
+        src_length: u64,
+        dest_offset: u64,
+    }
+    // _IOW(0x94, 13, struct file_clone_range)
+    const FICLONERANGE: libc::c_ulong = 0x4020_940d;
+    let arg = FileCloneRange {
+        src_fd: src.as_raw_fd() as i64,
+        src_offset: 0,
+        src_length: 0,
+        dest_offset,
+    };
+    // SAFETY: FICLONERANGE reads a file_clone_range, which `arg` is laid out as.
+    let ret = unsafe { libc::ioctl(dst.as_raw_fd(), FICLONERANGE as _, &arg) };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn clone_range(_: &std::fs::File, _: &std::fs::File, _: u64) -> std::io::Result<()> {
+    Err(std::io::ErrorKind::Unsupported.into())
 }
 
 fn require_tool(name: &str) -> Result<()> {
